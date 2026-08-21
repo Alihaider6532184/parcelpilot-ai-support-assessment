@@ -31,6 +31,7 @@ chroma/
 chroma_db/
 data/chroma/
 backend/chroma/
+backend/runtime/
 
 # Build, caches, logs, OS/editor files
 build/

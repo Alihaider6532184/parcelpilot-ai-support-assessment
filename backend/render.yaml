@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: parcelpilot-ai-support-api
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false

@@ -1,0 +1,9 @@
+# Architecture note
+
+The running system is a FastAPI backend plus a small Next.js App Router frontend. On startup the backend validates the workbook relationships, stores the three data sheets in SQLite, parses the README snapshot timestamp, extracts all six PDFs, tags each chunk with source status/account/authority metadata, and writes a Chroma collection (with a lexical sidecar fallback if the native Chroma runtime is unavailable).
+
+The agent exposes four tool contracts: `search_documents`, `lookup_records`, `evaluate_entitlement`, and `propose_escalation`. The local planner performs a deterministic multi-step path without keys so the demo is runnable offline. When configured, the provider adapter uses Groq OpenAI-compatible tool calling with bounded retry/backoff and falls back to Gemini. The evaluator, repository, and action ledger remain server-side regardless of model output.
+
+Every lookup resolves the record's account from SQLite and checks the signed mock session's scope before returning data. Document agreement filters are narrowed by that same scope. A supplied account ID can narrow a query but cannot widen access. Viewer sessions cannot propose actions. A proposal is stored as `pending_confirmation`; only the protected confirm endpoint, with `confirmed: true`, writes the action ledger, and repeat confirmation is idempotent.
+
+Reliability is deterministic: active account agreement > current SOP/policy > current product guide; deprecated v2 is excluded; ticket history is context-only and unverified. Missing pickup facts produce `needs_verification`. The supplied dataset snapshot is used as the time basis. The main trade-offs are ephemeral Render storage, startup ingestion/cold starts, a local no-key planner for reproducible demos, and free-tier provider latency/rate limits.
