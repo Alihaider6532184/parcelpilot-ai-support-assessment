@@ -2,6 +2,7 @@ from __future__ import annotations
 import math, re
 from collections import Counter
 from ..reliability.rules import rank_sources
+from ..data.embeddings import embed_text
 
 STOPWORDS={"a","an","and","are","any","about","can","current","does","explain","for","from","guidance","how","i","in","is","it","me","of","on","or","say","the","their","this","to","what","when","which","with"}
 SYNONYMS={
@@ -48,7 +49,9 @@ class DocumentTool:
             collection=chromadb.PersistentClient(path=str(self.chroma_dir)).get_collection("parcelpilot_documents")
             count=collection.count()
             if not count: return {},"lexical"
-            result=collection.query(query_texts=[query],n_results=min(24,count),include=["distances"])
+            # Supplying the embedding explicitly prevents Chroma from loading
+            # its default ONNX model again inside a request worker.
+            result=collection.query(query_embeddings=[embed_text(query)],n_results=min(24,count),include=["distances"])
             distances=(result.get("distances") or [[]])[0]; ids=(result.get("ids") or [[]])[0]
             return {doc_id:max(0.0,1.0-float(distance)) for doc_id,distance in zip(ids,distances)},"hybrid_chroma"
         except Exception:

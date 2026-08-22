@@ -34,7 +34,7 @@ cd backend
 pytest -q
 ```
 
-The tests cover cross-account denial in every tool path, confirmation gating/idempotency, actual-document precedence and deprecation, agreement overrides, unverified context, natural-language routing, multiple record IDs, customer-named no-ID entitlement scenarios, quota exhaustion, and distinct PDF sections. Document search uses heading-aware chunks and hybrid Chroma similarity plus query-sensitive lexical scoring; authority is only a relevance tie-breaker. The fifth tool, `analyze_operations`, queries the SQLite ticket data and detects issue groups recurring across customer accounts. The UI shows each invoked tool as a badge. Without API keys, the quota fallback still demonstrates the guarded flow; keys enable native hosted model selection.
+The tests cover cross-account denial in every tool path, confirmation gating/idempotency, actual-document precedence and deprecation, agreement overrides, unverified context, natural-language routing, multiple record IDs, customer-named no-ID entitlement scenarios, quota exhaustion, and distinct PDF sections. Document search uses heading-aware chunks and hybrid Chroma similarity plus query-sensitive lexical scoring; authority is only a relevance tie-breaker. Chroma's lightweight feature-hashed embeddings avoid a heavyweight model download and stay within hosted memory limits. The fifth tool, `analyze_operations`, queries the SQLite ticket data and detects issue groups recurring across customer accounts. The UI shows each invoked tool as a badge. Without API keys, the quota fallback still demonstrates the guarded flow; keys enable native hosted model selection.
 
 ## Deployment
 

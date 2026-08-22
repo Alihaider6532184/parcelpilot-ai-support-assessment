@@ -223,6 +223,14 @@ def test_document_retrieval_returns_topically_relevant_sections(tmp_path,query,e
     assert 'Scope and source precedence' not in top['section']
 
 
+def test_lightweight_embeddings_are_stable_and_topic_discriminating():
+    from app.data.embeddings import embed_text
+    def similarity(left,right): return sum(a*b for a,b in zip(embed_text(left),embed_text(right)))
+    cancellation='BOOKED shipment cancellation fee waiver before pickup'
+    assert embed_text(cancellation)==embed_text(cancellation)
+    assert similarity(cancellation,'cancel a booked shipment with no fee') > similarity(cancellation,'P1 security incident response target')
+
+
 @pytest.mark.parametrize('query,expected_text',[
     ('What is known about KI-208 bulk upload failures?','below 3,000 rows'),
     ('Do we have details for known issue KI-211?','up to 20 minutes late'),

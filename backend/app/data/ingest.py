@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 import pandas as pd
 from pypdf import PdfReader
+from .embeddings import embed_texts
 
 DOC_NAMES = {
     "01_Support_Policy_v3_CURRENT.pdf": ("policy", "current", None, 300, ["severity", "sla", "support"]),
@@ -14,7 +15,7 @@ DOC_NAMES = {
     "05_Northstar_Logistics_Enterprise_Agreement.pdf": ("agreement", "active", "ACCT-001", 400, ["cancellation", "service_credit", "sla"]),
     "06_LumenWorks_Service_Agreement.pdf": ("agreement", "active", "ACCT-002", 400, ["cancellation", "service_credit", "sla"]),
 }
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 
 def manifest(raw_dir: Path) -> str:
     h = hashlib.sha256()
@@ -123,7 +124,8 @@ def build_documents(raw_dir: Path, chroma_dir: Path) -> list[dict[str, Any]]:
             try: client.delete_collection("parcelpilot_documents")
             except Exception: pass
             collection = client.create_collection("parcelpilot_documents", metadata={"manifest": m,"index_version":INDEX_VERSION,"hnsw:space":"cosine"})
-            collection.add(ids=[d["id"] for d in docs], documents=[d["text"] for d in docs], metadatas=[d["metadata"] for d in docs])
+            texts=[d["text"] for d in docs]
+            collection.add(ids=[d["id"] for d in docs], documents=texts, metadatas=[d["metadata"] for d in docs], embeddings=embed_texts(texts))
     except Exception:
         pass
     # A lexical sidecar keeps local startup usable if Chroma or its embedding
