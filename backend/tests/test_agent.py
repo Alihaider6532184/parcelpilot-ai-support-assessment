@@ -38,8 +38,13 @@ def test_source_precedence_and_deprecation(tmp_path):
 
 def test_agreement_overrides_default_cancellation(tmp_path):
     repo, docs=make_runtime(tmp_path); manager=Session(user_id='manager',role='ops_manager',all_accounts=True)
-    lookup=repo.order('ORD-1001',manager); result=evaluate(lookup['record']['fields'],lookup['related']['account'],[{'citation_id':d['id'],**d['metadata']} for d in docs],'cancellation',None,lookup['dataset_now'])
+    lookup=repo.order('ORD-1001',manager); result=evaluate(lookup['record']['fields'],lookup['related']['account'],[{'citation_id':d['id'],'text':d['text'],**d['metadata']} for d in docs],'cancellation',None,lookup['dataset_now'])
     assert result['fee_inr']==0 and result['result']=='eligible'
+
+def test_agreement_without_waiver_keeps_default_cancellation_fee(tmp_path):
+    repo, docs=make_runtime(tmp_path); manager=Session(user_id='manager',role='ops_manager',all_accounts=True)
+    lookup=repo.order('ORD-2001',manager); result=evaluate(lookup['record']['fields'],lookup['related']['account'],[{'citation_id':d['id'],'text':d['text'],**d['metadata']} for d in docs],'cancellation',None,lookup['dataset_now'])
+    assert result['fee_inr']==250 and result['recommended_next_step']=='Cancel with the applicable INR 250 fee'
 
 def test_ticket_history_is_unverified(tmp_path):
     _, docs=make_runtime(tmp_path); ticket=next(x for x in docs if x['metadata']['source_type']=='policy')

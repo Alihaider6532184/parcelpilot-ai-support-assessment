@@ -49,7 +49,7 @@ def execute_tool(name, args, s, r):
     if name=="search_documents": return r.documents.search(DocumentQuery(**args),s)
     if name=="evaluate_entitlement":
         q=EvaluateQuery(**args); lookup=r.repo.order(q.order_id,s); account=lookup["related"]["account"]
-        return evaluate(lookup["record"]["fields"],account,[{"citation_id":d["id"],**d["metadata"]} for d in r.docs],q.evaluation_type,q.reported_pickup_at,r.dataset_now)
+        return evaluate(lookup["record"]["fields"],account,[{"citation_id":d["id"],"text":d["text"],**d["metadata"]} for d in r.docs],q.evaluation_type,q.reported_pickup_at,r.dataset_now)
     if name=="propose_escalation": return r.actions.propose(ProposalQuery(**args),s)
     raise HTTPException(status_code=400,detail="Unknown tool")
 
@@ -65,7 +65,8 @@ def local_answer(message, s, r):
         if oid and any(k in low for k in ("cancel","fee")):
             events.append({"type":"tool","name":"search_documents","status":"running"}); d=r.documents.search(DocumentQuery(query="cancellation fee BOOKED pickup agreement SOP",account_id=rec.get("account_id")),s); events[-1]["status"]="complete"; events[-1]["result"]=d
             events.append({"type":"tool","name":"evaluate_entitlement","status":"running"}); ev=execute_tool("evaluate_entitlement",{"order_id":oid,"evaluation_type":"cancellation","reported_pickup_at":None},s,r); events[-1]["status"]="complete"; events[-1]["result"]=ev
-            answer=f"For {oid}, the deterministic evaluation is **{ev['result']}**. Cancellation fee: INR {ev['fee_inr']}. {ev['recommended_next_step']}. Governing citations: {', '.join(ev['governing_sources'])}."
+            fee_note = "This is not fee-free." if ev["fee_inr"] else "This is fee-free."
+            answer=f"For {oid}, the deterministic evaluation is **{ev['result']}**. Cancellation fee: INR {ev['fee_inr']}. {fee_note} {ev['recommended_next_step']}. Governing citations: {', '.join(ev['governing_sources'])}."
         elif oid and any(k in low for k in ("credit","late","pickup","carrier")):
             events.append({"type":"tool","name":"search_documents","status":"running"}); d=r.documents.search(DocumentQuery(query="failed pickup service credit carrier fault threshold",account_id=rec.get("account_id")),s); events[-1]["status"]="complete"; events[-1]["result"]=d
             answer=f"I found {oid} for account {rec.get('account_id')}. A pickup-time observation is required before promising a credit. The current evidence is scoped to the account and the SOP/agreement citations are shown in the tool results."

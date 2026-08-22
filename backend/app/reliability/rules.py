@@ -29,12 +29,17 @@ def evaluate(order: dict[str, Any], account: dict[str, Any], docs: list[dict[str
     if evaluation_type == "cancellation":
         if order.get("status") == "BOOKED" and not order.get("pickup_actual_at"):
             fee = 0
-            if not agreement:
+            agreement_text = " ".join(str(d.get("text", "")) for d in agreement).lower()
+            # An agreement is not automatically a cancellation-fee override:
+            # LumenWorks explicitly says the default SOP applies, while
+            # Northstar explicitly waives the fee before pickup.
+            cancellation_waived = "no cancellation fee" in agreement_text and "no special cancellation-fee waiver applies" not in agreement_text
+            if not cancellation_waived:
                 try:
                     booked = datetime.fromisoformat(str(order["booked_at"]).replace(" ", "T")); req = datetime.fromisoformat(str(order["cancellation_requested_at"]).replace(" ", "T"))
                     fee = 0 if (req-booked).total_seconds() <= 1800 else 250
                 except Exception: missing.append("booking or cancellation timestamp")
-            return {"order_id": order_id,"account_id":account_id,"evaluation_type":evaluation_type,"result":"needs_verification" if missing else "eligible","fee_inr":fee,"credit_inr":0,"governing_sources":citations,"facts_used":facts,"missing_or_conflicting_facts":missing,"manager_approval_required":False,"recommended_next_step":"Cancel with no fee" if fee == 0 and not missing else "Verify timestamps before cancellation"}
+            return {"order_id": order_id,"account_id":account_id,"evaluation_type":evaluation_type,"result":"needs_verification" if missing else "eligible","fee_inr":fee,"credit_inr":0,"governing_sources":citations,"facts_used":facts,"missing_or_conflicting_facts":missing,"manager_approval_required":False,"recommended_next_step":"Cancel with no fee" if fee == 0 and not missing else "Cancel with the applicable INR 250 fee" if fee == 250 and not missing else "Verify timestamps before cancellation"}
         return {"order_id":order_id,"account_id":account_id,"evaluation_type":evaluation_type,"result":"not_eligible","fee_inr":0,"credit_inr":0,"governing_sources":citations,"facts_used":facts,"missing_or_conflicting_facts":[],"manager_approval_required":False,"recommended_next_step":"Use return-to-origin workflow"}
     # Service-credit facts must be explicit; reported_pickup_at is supplied by
     # the caller when the workbook does not have an actual pickup timestamp.
