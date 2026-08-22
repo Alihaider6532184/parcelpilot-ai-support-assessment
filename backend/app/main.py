@@ -36,7 +36,8 @@ def users(): return [{"user_id":u["user_id"],"role":u["role"],"allowed_account_i
 def login(q: LoginRequest, response: Response):
     u=USERS.get(q.user_id)
     if not u: raise HTTPException(status_code=400,detail="Unknown demo user")
-    response.set_cookie("parcelpilot_session",jwt.encode(u,SESSION_SECRET,algorithm="HS256"),httponly=True,samesite="lax",secure=False,max_age=3600)
+    production_cookie = FRONTEND_ORIGIN.startswith("https://")
+    response.set_cookie("parcelpilot_session",jwt.encode(u,SESSION_SECRET,algorithm="HS256"),httponly=True,samesite="none" if production_cookie else "lax",secure=production_cookie,max_age=3600)
     return u
 @app.post("/api/auth/logout")
 def logout(response: Response): response.delete_cookie("parcelpilot_session"); return {"ok":True}
