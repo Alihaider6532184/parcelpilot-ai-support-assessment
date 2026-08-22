@@ -69,7 +69,10 @@ def local_answer(message, s, r):
         elif oid and any(k in low for k in ("credit","late","pickup","carrier")):
             events.append({"type":"tool","name":"search_documents","status":"running"}); d=r.documents.search(DocumentQuery(query="failed pickup service credit carrier fault threshold",account_id=rec.get("account_id")),s); events[-1]["status"]="complete"; events[-1]["result"]=d
             answer=f"I found {oid} for account {rec.get('account_id')}. A pickup-time observation is required before promising a credit. The current evidence is scoped to the account and the SOP/agreement citations are shown in the tool results."
-        else: answer=f"Authorized record lookup for {rec.get('account_id')}: {json.dumps(rec,default=str)}"
+        else:
+            label = rec.get("order_id") or rec.get("ticket_id") or rec.get("account_id") or "record"
+            details = "; ".join(f"{k.replace('_', ' ')}: {v}" for k, v in rec.items() if v not in (None, ""))
+            answer = f"Authorized details for {label}: {details}. Dataset snapshot: {r.dataset_now}."
     else:
         answer="I found the following authoritative passages. I excluded deprecated policy and unverified ticket history from the current answer: " + " ".join(x["text"] for x in first.get("results",[])[:3])
     return {"answer":answer,"events":events,"dataset_now":r.dataset_now}
