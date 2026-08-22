@@ -4,26 +4,27 @@ An internal support/operations copilot for the supplied assessment pack. It uses
 
 ## Local setup
 
-Requirements: Python 3.11+, Node 18+, and npm. Copy `.env.example` to `backend/.env` or export the variables in your shell. `GROQ_API_KEY` is optional for the local deterministic demo; when supplied, the provider adapter tries Groq with retry/backoff and falls back to Gemini after retryable errors. Never commit keys.
+Requirements: Python 3.11-3.13, Node 18+, npm, and Git. Start in the cloned repository root. `.env.example` is a reference list; the application reads shell environment variables, so do not assume that copying the file will load it automatically. No API key is required for the deterministic local demo. If supplied in the backend terminal, `GROQ_API_KEY` enables Groq routing and `GEMINI_API_KEY` enables the retry fallback. Never commit keys.
 
 ```powershell
 cd backend
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m uvicorn app.main:app --reload --port 8000
 ```
+
+The first dependency installation can take several minutes because Chroma has a large dependency tree. Wait for `Application startup complete`, then verify http://localhost:8000/healthz returns `{"status":"ok","ready":true}`. To enable hosted routing before starting the server, set keys in that same PowerShell window, for example `$env:GROQ_API_KEY="your-key"` and optionally `$env:GEMINI_API_KEY="your-key"`. The local `SESSION_SECRET` default is demo-only; set `$env:SESSION_SECRET` to a long random value when testing production-like cookies.
 
 In another terminal:
 
 ```powershell
 cd frontend
-npm install
+npm ci
 $env:NEXT_PUBLIC_API_BASE_URL="http://localhost:8000"
 npm run dev
 ```
 
-Open http://localhost:3000 and choose `priya`, `arjun`, `manager`, or `viewer`. The source pack is read from `data/raw/` by default. To rebuild the SQLite/Chroma runtime after changing raw files, delete `backend/runtime/` and restart; or set `PARCELPILOT_DATA_DIR` to another directory containing the same seven files.
+Open http://localhost:3000 and choose `priya`, `arjun`, `manager`, or `viewer`. The source pack is read from `data/raw/` by default. To rebuild SQLite and Chroma after changing raw files, stop the backend, delete the repository-root `runtime/` directory, and restart. Alternatively, set `PARCELPILOT_DATA_DIR` in the backend terminal to another directory containing the same seven source files.
 
 Native model tool-selection calls are capped by `MODEL_DAILY_LIMIT` (default 40 per process day): calls 1-40 may use the hosted router and call 41 falls back locally. High-confidence cancellation/credit scenarios run through deterministic order resolution and calculation without consuming this budget. The current defaults are `openai/gpt-oss-20b` on Groq and `gemini-3.6-flash` on Gemini; override them with `GROQ_MODEL` or `GEMINI_MODEL`. Groq receives all five function declarations with required tool choice; Gemini uses native function calling as the retry fallback. If both providers time out, rate-limit, or reach the cap, the tested local router continues through the same guarded tools and must still return a complete calculation or an explicit missing-information response. No provider can guarantee an unlimited free quota, but quota exhaustion does not take down the demo.
 
@@ -31,7 +32,7 @@ Native model tool-selection calls are capped by `MODEL_DAILY_LIMIT` (default 40 
 
 ```powershell
 cd backend
-pytest -q
+.\.venv\Scripts\python -m pytest -q
 ```
 
 The tests cover cross-account denial in every tool path, confirmation gating/idempotency, actual-document precedence and deprecation, agreement overrides, unverified context, natural-language routing, multiple record IDs, customer-named no-ID entitlement scenarios, quota exhaustion, and distinct PDF sections. Document search uses heading-aware chunks and hybrid Chroma similarity plus query-sensitive lexical scoring; authority is only a relevance tie-breaker. Chroma's lightweight feature-hashed embeddings avoid a heavyweight model download and stay within hosted memory limits. The fifth tool, `analyze_operations`, queries the SQLite ticket data and detects issue groups recurring across customer accounts. The UI shows each invoked tool as a badge. Without API keys, the quota fallback still demonstrates the guarded flow; keys enable native hosted model selection.
