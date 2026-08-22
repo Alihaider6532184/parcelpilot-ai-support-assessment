@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json, re, uuid
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -67,9 +67,14 @@ def execute_tool(name, args, s, r, context=None):
     if name=="lookup_records": return r.repo.lookup(LookupQuery(**args),s)
     if name=="search_documents": return r.documents.search(DocumentQuery(**args),s)
     if name=="evaluate_entitlement":
-        q=EvaluateQuery(**args); lookup=r.repo.order(q.order_id,s); account=lookup["related"]["account"]
-        observed=q.reported_pickup_at or lookup["record"]["fields"].get("pickup_actual_at")
-        return evaluate(lookup["record"]["fields"],account,[{"citation_id":d["id"],"text":d["text"],**d["metadata"]} for d in r.docs],q.evaluation_type,observed,r.dataset_now)
+        q=EvaluateQuery(**args); lookup=r.repo.resolve_entitlement_order(q,s); account=lookup["related"]["account"]
+        order=lookup["record"]["fields"]; observed=q.reported_pickup_at or order.get("pickup_actual_at")
+        if not observed and q.delay_hours is not None:
+            end=datetime.fromisoformat(str(order["pickup_window_end"]).replace(" ","T")); observed=(end+timedelta(hours=q.delay_hours)).isoformat()
+        if not observed and q.evaluation_type=="service_credit" and order.get("status")=="BOOKED":
+            snapshot=datetime.fromisoformat(r.dataset_now[:16]); end=datetime.fromisoformat(str(order["pickup_window_end"]).replace(" ","T"))
+            if snapshot>end: observed=snapshot.isoformat()
+        return evaluate(order,account,[{"citation_id":d["id"],"text":d["text"],**d["metadata"]} for d in r.docs],q.evaluation_type,observed,r.dataset_now)
     if name=="analyze_operations": return r.analytics.analyze(AnalyticsQuery(**args),s)
     if name=="propose_escalation":
         # Classify first, then deny by role. This intentionally happens before
@@ -112,12 +117,16 @@ def _answer_for(name, result, r):
         note=f" Same-customer repeats found: {repeats}." if repeats else ""
         return f"I analyzed {result['ticket_count']} real tickets across {len(result['accounts_analyzed'])} accounts. No significant recurring issue was found across {result['minimum_accounts']} or more customers.{note} Dataset snapshot: {result['dataset_now']}."
     if name=="evaluate_entitlement":
+        facts=result["facts_used"]
+        clauses="; ".join(f"{x['file_name']} — {x['section']} ({x['citation_id']})" for x in result.get("governing_clauses",[]))
+        order_details=f"Order details: {result['order_id']}, account {result.get('account_name') or result['account_id']}, carrier {facts.get('carrier')}, status {facts.get('status')}, pickup-window end {facts.get('pickup_window_end')}"
         if result["evaluation_type"]=="cancellation":
-            fee_note="This is not fee-free." if result["fee_inr"] else "This is fee-free."
-            return f"For {result['order_id']}, the deterministic cancellation evaluation is **{result['result']}**. Cancellation fee: INR {result['fee_inr']}. {fee_note} {result['recommended_next_step']}. Governing citations: {', '.join(result['governing_sources'])}."
+            waiver="No fee; the customer agreement's full waiver applies." if result.get("full_waiver") else "This is fee-free under the standard timing rule." if result["fee_inr"]==0 else f"The applicable fee is INR {result['fee_inr']}."
+            return f"For {result['order_id']}, the deterministic cancellation evaluation is **{result['result']}**. {order_details}, booked at {facts.get('booked_at')}. Cancellation fee: INR {result['fee_inr']}. {waiver} {result['recommended_next_step']}. Governing clauses: {clauses}."
         if result["result"]=="needs_verification":
-            return f"For {result['order_id']}, the service-credit calculation needs verification. Missing facts: {', '.join(result['missing_or_conflicting_facts'])}. Governing citations: {', '.join(result['governing_sources'])}."
-        return f"For {result['order_id']}, the deterministic service-credit evaluation is **{result['result']}**. Credit: INR {result['credit_inr']}. {result['recommended_next_step']}. Governing citations: {', '.join(result['governing_sources'])}."
+            return f"For {result['order_id']}, the service-credit calculation needs verification. {order_details}. Missing facts: {', '.join(result['missing_or_conflicting_facts'])}. Governing clauses: {clauses}."
+        fault_details=f"observed/reported at {facts.get('observed_or_reported_at')}, delay {facts.get('delay_hours')} hours, carrier fault {'yes' if facts.get('carrier_fault') else 'no'}, customer fault {'yes' if facts.get('customer_fault') else 'no'}, shipment fee INR {facts.get('shipment_fee_inr')}"
+        return f"For {result['order_id']}, the deterministic service-credit evaluation is **{result['result']}**. {order_details}, {fault_details}. Credit owed: INR {result['credit_inr']}. {result['recommended_next_step']}. Governing clauses: {clauses}."
     if name=="lookup_records":
         records=result.get("records")
         if records is not None:
@@ -127,7 +136,10 @@ def _answer_for(name, result, r):
         rec=result["record"]["fields"]; label=rec.get("order_id") or rec.get("ticket_id") or rec.get("account_id") or "record"
         details="; ".join(f"{k.replace('_',' ')}: {v}" for k,v in rec.items() if v not in (None,""))
         return f"Authorized details for {label}: {details}. Dataset snapshot: {r.dataset_now}."
-    return "I found the following authoritative passages. I excluded deprecated policy and unverified ticket history from the current answer: "+" ".join(x["text"] for x in result.get("results",[])[:3])
+    results=result.get("results",[]); best=float(results[0].get("score",0)) if results else 0
+    selected=[x for x in results if float(x.get("score",0)) >= best*.45][:3]
+    passages=" ".join(f"[{x['citation_id']} — {x.get('section')}] {x['text']}" for x in selected)
+    return "I found these topically ranked authoritative passages (deprecated policy and unverified ticket history excluded): "+passages
 
 
 def _dispatch(selection: ToolSelection, message, s, r, source):
@@ -170,8 +182,13 @@ async def _model_selection(message: str, session: Session, context: dict, router
 
 async def run_agent(message, s, r, router_provider=None):
     context=LAST_CONTEXT.get(_context_key(s),{})
-    model_choice=await _model_selection(message,s,context,router_provider)
     guard=high_confidence_selection(message,context)
+    # High-confidence safety/calculation intents are independent of provider
+    # latency and the hosted-call budget. Ambiguous language still uses native
+    # model function selection, with this same guard correcting unsafe choices.
+    if guard and router_provider is None:
+        return _dispatch(guard,message,s,r,"deterministic_intent")
+    model_choice=await _model_selection(message,s,context,router_provider)
     if model_choice:
         selection,source=model_choice
         if guard and selection.name != guard.name:
@@ -180,6 +197,8 @@ async def run_agent(message, s, r, router_provider=None):
             selection=ToolSelection(selection.name,{**selection.arguments,**guard.arguments})
     else:
         selection=infer_fallback(message,context); source="local_quota_fallback"
+    if selection.name=="evaluate_entitlement":
+        selection=ToolSelection(selection.name,{**selection.arguments,"scenario_text":message})
     return _dispatch(selection,message,s,r,source)
 
 

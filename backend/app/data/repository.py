@@ -1,5 +1,7 @@
 from __future__ import annotations
 import sqlite3
+import re
+from datetime import datetime
 from typing import Any
 from fastapi import HTTPException
 from ..schemas.models import Session
@@ -59,3 +61,61 @@ class Repository:
         class Q: pass
         q=Q(); q.record_type="account"; q.record_id=account_id; q.include_related=True
         return self.lookup(q, session)
+
+    def _account_from_scenario(self, conn, text: str, session: Session):
+        words=set(re.findall(r"[a-z0-9]+",(text or "").lower()))
+        matches=[]
+        for raw in conn.execute("SELECT * FROM accounts ORDER BY account_id"):
+            row=dict(raw); name_words={x for x in re.findall(r"[a-z0-9]+",row["account_name"].lower()) if len(x)>=4}
+            score=len(words & name_words)
+            if score: matches.append((score,row))
+        if matches:
+            matches.sort(key=lambda item:(-item[0],item[1]["account_id"])); account=matches[0][1]
+            self._allowed(session,account["account_id"]); return account
+        if not session.all_accounts and len(session.allowed_account_ids)==1:
+            row=conn.execute("SELECT * FROM accounts WHERE account_id=?",(session.allowed_account_ids[0],)).fetchone()
+            return dict(row) if row else None
+        return None
+
+    def resolve_entitlement_order(self, q, session: Session):
+        """Resolve an authorized concrete order from an ID or supplied scenario."""
+        if q.order_id: return self.order(q.order_id,session)
+        with self._conn() as conn:
+            account=None
+            if q.account_id:
+                account=self._account_for(conn,"account",q.account_id); self._allowed(session,account["account_id"])
+            else:
+                account=self._account_from_scenario(conn," ".join(x for x in (q.customer_name,q.scenario_text) if x),session)
+            if not account:
+                raise HTTPException(status_code=422,detail="A customer or order must be identifiable for this calculation")
+            orders=[dict(row) for row in conn.execute("SELECT * FROM orders WHERE account_id=? ORDER BY order_id",(account["account_id"],))]
+            candidates=[]
+            for order in orders:
+                if q.evaluation_type=="cancellation":
+                    if order.get("status") not in {"DRAFT","BOOKED"} or order.get("pickup_actual_at"): continue
+                    score=5
+                    if q.booking_age_hours is not None:
+                        try:
+                            now=datetime.fromisoformat(self.dataset_now[:16]); booked=datetime.fromisoformat(str(order["booked_at"]).replace(" ","T")); score-=abs(((now-booked).total_seconds()/3600)-q.booking_age_hours)
+                        except Exception: pass
+                    candidates.append((score,order))
+                else:
+                    if q.carrier_fault is True and not bool(order.get("carrier_fault")): continue
+                    if q.customer_fault is False and bool(order.get("customer_fault")): continue
+                    score=0
+                    if bool(order.get("carrier_fault")): score+=4
+                    if not bool(order.get("customer_fault")): score+=2
+                    if not order.get("pickup_actual_at"): score+=1
+                    try:
+                        now=datetime.fromisoformat(self.dataset_now[:16]); end=datetime.fromisoformat(str(order["pickup_window_end"]).replace(" ","T"))
+                        if now > end: score+=3
+                        if q.delay_hours is not None: score-=abs(((now-end).total_seconds()/3600)-q.delay_hours)*.1
+                    except Exception: pass
+                    candidates.append((score,order))
+            if not candidates:
+                raise HTTPException(status_code=422,detail=f"No authorized order matches the supplied {q.evaluation_type.replace('_',' ')} facts")
+            candidates.sort(key=lambda item:(-item[0],item[1]["order_id"])); best_score,best=candidates[0]
+            if len(candidates)>1 and abs(best_score-candidates[1][0])<.01:
+                raise HTTPException(status_code=422,detail="More than one authorized order matches; provide an order ID")
+            order_id=best["order_id"]
+        return self.order(order_id,session)

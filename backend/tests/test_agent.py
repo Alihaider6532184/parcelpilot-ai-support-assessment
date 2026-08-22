@@ -10,6 +10,7 @@ from app.tools.actions import ActionTool
 from app.tools.analytics import AnalyticsTool
 from app.reliability.rules import evaluate, rank_sources
 from app.main import LAST_CONTEXT, local_answer, run_agent
+import app.main as main_module
 
 ROOT=Path(__file__).parents[2]
 def make_runtime(tmp_path):
@@ -23,7 +24,7 @@ def make_agent_runtime(tmp_path):
     repo, docs=make_runtime(tmp_path)
     runtime=SimpleNamespace(
         repo=repo, docs=docs, dataset_now=repo.dataset_now,
-        documents=DocumentTool(docs,tmp_path/'agent_chroma'),
+        documents=DocumentTool(docs,tmp_path/'chroma'),
         actions=ActionTool(tmp_path/'agent_actions.sqlite'),
     )
     runtime.analytics=AnalyticsTool(repo)
@@ -202,3 +203,68 @@ def test_natural_language_routing_matrix(tmp_path,user,message,expected_tool,exp
     assert tool_names(result)==[expected_tool]
     assert result['events'][0]['status']==expected_status
     assert expected_text.lower() in result['answer'].lower()
+
+
+@pytest.mark.parametrize('query,expected_section,expected_text',[
+    ('What are the P1 severity rules?','2. Severity definitions','Complete production outage'),
+    ('What are the Enterprise first-response targets?','3. Default first-response targets','30 minutes'),
+    ('What are the BOOKED cancellation fees after 30 minutes?','1. Order cancellation','INR 250'),
+    ('Explain KI-208 bulk upload failures.','KI-208 - Bulk Upload failures','below 3,000 rows'),
+    ('Explain KI-211 SwiftShip webhook delay.','KI-211 - SwiftShip pickup webhook delay','up to 20 minutes late'),
+    ('What are the Growth plan bulk upload limits?','1. Plan capabilities','up to 5,000 rows'),
+])
+def test_document_retrieval_returns_topically_relevant_sections(tmp_path,query,expected_section,expected_text):
+    _,docs=make_runtime(tmp_path); manager=Session(user_id='manager',role='ops_manager',all_accounts=True)
+    result=DocumentTool(docs,tmp_path/'chroma').search(DocumentQuery(query=query),manager)
+    assert result['results']
+    top=result['results'][0]
+    assert expected_section in top['section']
+    assert expected_text.lower() in top['text'].lower()
+    assert 'Scope and source precedence' not in top['section']
+
+
+def test_account_named_cancellation_retrieves_contract_and_sop_sections(tmp_path):
+    _,docs=make_runtime(tmp_path); priya=Session(user_id='priya',role='support_agent',allowed_account_ids=['ACCT-001'])
+    result=DocumentTool(docs,tmp_path/'chroma').search(DocumentQuery(query="Can Northstar cancel a BOOKED shipment before pickup without a fee?"),priya)
+    top=result['results'][:3]; sections=[x['section'] for x in top]
+    assert result['resolved_account_id']=='ACCT-001'
+    assert any(x['source_type']=='agreement' and x['account_id']=='ACCT-001' and 'Shipment cancellation' in x['section'] for x in top)
+    assert any(x['source_type']=='sop' and 'Order cancellation' in x['section'] for x in top)
+
+
+def test_exact_customer_named_scenarios_are_complete_without_model(tmp_path):
+    LAST_CONTEXT.clear(); r=make_agent_runtime(tmp_path)
+    priya=Session(user_id='priya',role='support_agent',allowed_account_ids=['ACCT-001'])
+    arjun=Session(user_id='arjun',role='support_agent',allowed_account_ids=['ACCT-002'])
+    northstar=asyncio.run(run_agent("Can Northstar cancel a shipment booked 2 hours ago that hasn't been picked up? Any fee?",priya,r))
+    lumen=asyncio.run(run_agent('LumenWorks had a pickup that was 5 hours late, carrier at fault, no customer fault. What credit are they owed?',arjun,r))
+    assert tool_names(northstar)==['evaluate_entitlement'] and northstar['model_routing']=='deterministic_intent'
+    assert 'ORD-1001' in northstar['answer'] and 'Cancellation fee: INR 0' in northstar['answer'] and 'full waiver' in northstar['answer']
+    assert '2. Shipment cancellation' in northstar['answer']
+    assert tool_names(lumen)==['evaluate_entitlement'] and lumen['model_routing']=='deterministic_intent'
+    assert 'ORD-2002' in lumen['answer'] and 'Credit owed: INR 300' in lumen['answer']
+    assert 'carrier fault yes' in lumen['answer'] and 'customer fault no' in lumen['answer'] and '3. Failed-pickup credits' in lumen['answer']
+
+
+def test_customer_named_entitlement_cannot_cross_account_scope(tmp_path):
+    LAST_CONTEXT.clear(); r=make_agent_runtime(tmp_path)
+    arjun=Session(user_id='arjun',role='support_agent',allowed_account_ids=['ACCT-002'])
+    result=local_answer("Can Northstar cancel a shipment booked 2 hours ago without a fee?",arjun,r)
+    assert tool_names(result)==['evaluate_entitlement']
+    assert result['events'][0]['status']=='denied'
+    assert 'outside this session scope' in result['answer']
+
+
+def test_daily_model_limit_falls_back_before_the_41st_call_without_partial_answer(tmp_path,monkeypatch):
+    LAST_CONTEXT.clear(); r=make_agent_runtime(tmp_path)
+    manager=Session(user_id='manager',role='ops_manager',all_accounts=True)
+    class MustNotRun:
+        async def complete(self,*args,**kwargs): raise AssertionError('provider must not run after daily limit')
+    monkeypatch.setattr(main_module,'GROQ_API_KEY','configured')
+    monkeypatch.setattr(main_module,'provider',MustNotRun())
+    monkeypatch.setattr(main_module,'model_call_day',main_module.date.today())
+    monkeypatch.setattr(main_module,'model_calls_today',main_module.MODEL_DAILY_LIMIT)
+    result=asyncio.run(run_agent('What does the current support policy say about P1 severity?',manager,r))
+    assert result['model_routing']=='local_quota_fallback'
+    assert tool_names(result)==['search_documents']
+    assert 'Complete production outage' in result['answer']

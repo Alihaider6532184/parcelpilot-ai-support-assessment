@@ -22,6 +22,27 @@ def _ids(message: str) -> tuple[str | None, str | None, str | None]:
     )
 
 
+def _number_before(message: str, suffix: str) -> float | None:
+    match=re.search(rf"(\d+(?:\.\d+)?)\s*{suffix}",message.lower())
+    return float(match.group(1)) if match else None
+
+
+def _entitlement_args(message: str, evaluation_type: str, order_id: str | None) -> dict:
+    lower=message.lower()
+    booking_age=_number_before(message,r"hours?\s+ago") if "book" in lower else None
+    delay=_number_before(message,r"hours?\s+late")
+    return {
+        "order_id":order_id,
+        "evaluation_type":evaluation_type,
+        "reported_pickup_at":None,
+        "scenario_text":message,
+        "booking_age_hours":booking_age,
+        "delay_hours":delay,
+        "carrier_fault":True if re.search(r"carrier(?:\s+is|\s+was|\s+at)?\s+fault|carrier's fault",lower) else None,
+        "customer_fault":False if re.search(r"no\s+customer(?:-caused)?\s+fault|customer\s+(?:is|was)\s+not\s+at\s+fault",lower) else None,
+    }
+
+
 def high_confidence_selection(message: str, context: dict | None = None) -> ToolSelection | None:
     """Safety invariants for intents where a wrong tool would hide a denial.
 
@@ -51,10 +72,13 @@ def high_confidence_selection(message: str, context: dict | None = None) -> Tool
     if cross:
         record_type="order" if words & {"order","orders","shipment","shipments","history"} else "ticket" if words & {"ticket","tickets","complaint","complaints"} else "account"
         return ToolSelection("lookup_records",{"record_type":record_type,"record_id":None,"include_related":True,"query_scope":"other_accounts"})
-    if oid and words & {"cancel","cancelling","cancellation","fee","charge","charges","cost"}:
-        return ToolSelection("evaluate_entitlement",{"order_id":oid,"evaluation_type":"cancellation","reported_pickup_at":None})
-    if oid and words & {"credit","owed","late","pickup","carrier","sla"}:
-        return ToolSelection("evaluate_entitlement",{"order_id":oid,"evaluation_type":"service_credit","reported_pickup_at":None})
+    cancellation=bool(words & {"cancel","cancelling","cancellation","fee","charge","charges","cost"})
+    cancellation_scenario=bool(oid) or (cancellation and bool(words & {"shipment","order","booked","picked","pickup"}) and bool(words & {"ago","booked","picked","pickup","fee"}))
+    if cancellation and cancellation_scenario:
+        return ToolSelection("evaluate_entitlement",_entitlement_args(message,"cancellation",oid))
+    service_credit=bool(words & {"credit","credits","owed"}) and bool(words & {"late","pickup","carrier","fault","sla","owed"})
+    if (oid and words & {"credit","owed","late","pickup","carrier","sla"}) or service_credit:
+        return ToolSelection("evaluate_entitlement",_entitlement_args(message,"service_credit",oid))
     if oid: return ToolSelection("lookup_records",{"record_type":"order","record_id":oid,"include_related":True,"query_scope":"assigned_accounts"})
     if tid: return ToolSelection("lookup_records",{"record_type":"ticket","record_id":tid,"include_related":True,"query_scope":"assigned_accounts"})
     if aid: return ToolSelection("lookup_records",{"record_type":"account","record_id":aid,"include_related":True,"query_scope":"assigned_accounts"})

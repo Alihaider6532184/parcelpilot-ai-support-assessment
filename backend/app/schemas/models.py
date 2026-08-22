@@ -37,9 +37,16 @@ class AnalyticsQuery(BaseModel):
     include_closed: bool = True
 
 class EvaluateQuery(BaseModel):
-    order_id: str
+    order_id: str | None = None
+    account_id: str | None = None
+    customer_name: str | None = None
     evaluation_type: Literal["cancellation", "service_credit"]
     reported_pickup_at: str | None = None
+    scenario_text: str | None = None
+    booking_age_hours: float | None = Field(default=None, ge=0)
+    delay_hours: float | None = Field(default=None, ge=0)
+    carrier_fault: bool | None = None
+    customer_fault: bool | None = None
 
 class ProposalQuery(BaseModel):
     account_id: str
