@@ -11,13 +11,13 @@ class ActionTool:
             c.execute("CREATE TABLE IF NOT EXISTS proposals (proposal_id TEXT PRIMARY KEY, user_id TEXT, account_id TEXT, payload TEXT, status TEXT, expires_at TEXT, action_id TEXT)")
             c.execute("CREATE TABLE IF NOT EXISTS actions (action_id TEXT PRIMARY KEY, proposal_id TEXT UNIQUE, user_id TEXT, account_id TEXT, payload TEXT, created_at TEXT)")
     def propose(self, q, session):
-        if session.role == "viewer": raise HTTPException(status_code=403, detail="Viewer cannot propose actions")
+        if session.role == "viewer": raise HTTPException(status_code=403, detail="This role is not permitted to create escalation proposals")
         if not session.all_accounts and q.account_id not in session.allowed_account_ids: raise HTTPException(status_code=403, detail="Account is outside this session scope")
         pid=str(uuid.uuid4()); expires=(datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat(); payload=q.model_dump()
         with sqlite3.connect(self.path) as c: c.execute("INSERT INTO proposals VALUES (?,?,?,?,?,?,?)",(pid,session.user_id,q.account_id,json.dumps(payload),"pending_confirmation",expires,None))
         return {"proposal_id":pid,"status":"pending_confirmation","summary":q.reason,"payload_preview":payload,"expires_at":expires,"confirmation_phrase":"Confirm escalation"}
     def confirm(self, proposal_id, confirmed, session):
-        if session.role == "viewer": raise HTTPException(status_code=403, detail="Viewer cannot confirm actions")
+        if session.role == "viewer": raise HTTPException(status_code=403, detail="This role is not permitted to confirm escalation actions")
         if not confirmed: raise HTTPException(status_code=400, detail="Explicit confirmation is required")
         with sqlite3.connect(self.path) as c:
             c.row_factory=sqlite3.Row; row=c.execute("SELECT * FROM proposals WHERE proposal_id=?",(proposal_id,)).fetchone()

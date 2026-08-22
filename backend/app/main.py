@@ -5,11 +5,12 @@ from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 import jwt
+from pydantic import ValidationError
 from .config import SESSION_SECRET, FRONTEND_ORIGIN, GROQ_API_KEY, GEMINI_API_KEY, GROQ_MODEL, GEMINI_MODEL, MODEL_DAILY_LIMIT
 from .schemas.models import *
 from .services.runtime import Runtime
 from .agent.providers import Provider, SYSTEM, TOOLS
-from .agent.local import infer, is_action_intent
+from .agent.local import ToolSelection, high_confidence_selection, infer_fallback
 from .reliability.rules import evaluate
 
 app=FastAPI(title="ParcelPilot AI Support", version="1.0.0")
@@ -57,13 +58,37 @@ def logout(request: Request, response: Response):
 @app.get("/api/me")
 def me(s: Session=Depends(get_session)): return s
 
-def execute_tool(name, args, s, r):
+def _valid_id(value, prefix):
+    value=str(value or "").upper()
+    return value if re.fullmatch(fr"{prefix}-\d+",value) else None
+
+
+def execute_tool(name, args, s, r, context=None):
     if name=="lookup_records": return r.repo.lookup(LookupQuery(**args),s)
     if name=="search_documents": return r.documents.search(DocumentQuery(**args),s)
     if name=="evaluate_entitlement":
         q=EvaluateQuery(**args); lookup=r.repo.order(q.order_id,s); account=lookup["related"]["account"]
-        return evaluate(lookup["record"]["fields"],account,[{"citation_id":d["id"],"text":d["text"],**d["metadata"]} for d in r.docs],q.evaluation_type,q.reported_pickup_at,r.dataset_now)
-    if name=="propose_escalation": return r.actions.propose(ProposalQuery(**args),s)
+        observed=q.reported_pickup_at or lookup["record"]["fields"].get("pickup_actual_at")
+        return evaluate(lookup["record"]["fields"],account,[{"citation_id":d["id"],"text":d["text"],**d["metadata"]} for d in r.docs],q.evaluation_type,observed,r.dataset_now)
+    if name=="analyze_operations": return r.analytics.analyze(AnalyticsQuery(**args),s)
+    if name=="propose_escalation":
+        # Classify first, then deny by role. This intentionally happens before
+        # ID/argument validation so a viewer always receives the real reason.
+        if s.role == "viewer": raise HTTPException(status_code=403,detail="This role is not permitted to create escalation proposals")
+        context=context or {}
+        order_id=_valid_id(args.get("order_id"),"ORD") or context.get("order_id")
+        ticket_id=_valid_id(args.get("ticket_id"),"TKT") or context.get("ticket_id")
+        account_id=_valid_id(args.get("account_id"),"ACCT") or context.get("account_id")
+        if order_id:
+            lookup=r.repo.order(order_id,s); account_id=lookup["record"]["fields"]["account_id"]
+        elif ticket_id:
+            lookup=r.repo.lookup(LookupQuery(record_type="ticket",record_id=ticket_id),s); account_id=lookup["record"]["fields"]["account_id"]
+        elif account_id:
+            r.repo.account(account_id,s)
+        else:
+            raise HTTPException(status_code=422,detail="An authorized order, ticket, or account ID is required before an escalation can be proposed")
+        q=ProposalQuery(account_id=account_id,order_id=order_id,ticket_id=ticket_id,reason=args.get("reason") or "Escalation requested",severity=args.get("severity") or "P2",evidence_citation_ids=args.get("evidence_citation_ids") or [])
+        return r.actions.propose(q,s)
     raise HTTPException(status_code=400,detail="Unknown tool")
 
 def _remember_context(session: Session, record: dict) -> None:
@@ -76,86 +101,96 @@ def _context_key(session: Session) -> str:
     return session.session_id or f"test:{session.user_id}"
 
 
-def local_answer(message, s, r):
-    action_intent=is_action_intent(message)
-    context=LAST_CONTEXT.get(_context_key(s))
-    if action_intent and not re.search(r"(?:ORD|TKT|ACCT)-\d+", message.upper()) and not context:
-        return {"answer":"I can prepare an escalation, but I need the order, ticket, or account to act on. Please provide its ID or look it up first.","events":[],"dataset_now":r.dataset_now}
-    events=[]; calls=infer(message,context); first_name, first_q=calls[0]; events.append({"type":"tool","name":first_name,"status":"running"}); first=execute_tool(first_name,first_q.model_dump(),s,r); events[-1]["status"]="complete"; events[-1]["result"]=first
-    if first_name=="lookup_records":
-        rec=first["record"]["fields"]; low=message.lower(); oid=rec.get("order_id");
-        _remember_context(s, rec)
-        if action_intent:
-            account_id=rec.get("account_id")
-            proposal=execute_tool("propose_escalation", {"account_id":account_id,"order_id":oid,"ticket_id":rec.get("ticket_id"),"reason":message,"severity":"P1" if "urgent" in low else "P2","evidence_citation_ids":[]},s,r)
-            events.append({"type":"tool","name":"propose_escalation","status":"complete","result":proposal})
-            return {"answer":f"I prepared an escalation draft for {account_id}. It is pending your explicit confirmation; no action has been executed.","events":events,"dataset_now":r.dataset_now}
-        if oid and any(k in low for k in ("cancel","fee")):
-            events.append({"type":"tool","name":"search_documents","status":"running"}); d=r.documents.search(DocumentQuery(query="cancellation fee BOOKED pickup agreement SOP",account_id=rec.get("account_id")),s); events[-1]["status"]="complete"; events[-1]["result"]=d
-            events.append({"type":"tool","name":"evaluate_entitlement","status":"running"}); ev=execute_tool("evaluate_entitlement",{"order_id":oid,"evaluation_type":"cancellation","reported_pickup_at":None},s,r); events[-1]["status"]="complete"; events[-1]["result"]=ev
-            fee_note = "This is not fee-free." if ev["fee_inr"] else "This is fee-free."
-            answer=f"For {oid}, the deterministic evaluation is **{ev['result']}**. Cancellation fee: INR {ev['fee_inr']}. {fee_note} {ev['recommended_next_step']}. Governing citations: {', '.join(ev['governing_sources'])}."
-        elif oid and any(k in low for k in ("credit","late","pickup","carrier","sla")):
-            events.append({"type":"tool","name":"search_documents","status":"running"}); d=r.documents.search(DocumentQuery(query="failed pickup service credit carrier fault threshold",account_id=rec.get("account_id")),s); events[-1]["status"]="complete"; events[-1]["result"]=d
-            events.append({"type":"tool","name":"evaluate_entitlement","status":"running"}); ev=execute_tool("evaluate_entitlement",{"order_id":oid,"evaluation_type":"service_credit","reported_pickup_at":rec.get("pickup_actual_at")},s,r); events[-1]["status"]="complete"; events[-1]["result"]=ev
-            if ev["result"] == "needs_verification":
-                answer=f"For {oid}, the service-credit calculation needs verification before any credit can be promised. Missing facts: {', '.join(ev['missing_or_conflicting_facts'])}. Governing citations: {', '.join(ev['governing_sources'])}."
-            else:
-                answer=f"For {oid}, the deterministic service-credit evaluation is **{ev['result']}**. Credit: INR {ev['credit_inr']}. {ev['recommended_next_step']}. Governing citations: {', '.join(ev['governing_sources'])}."
-        else:
-            label = rec.get("order_id") or rec.get("ticket_id") or rec.get("account_id") or "record"
-            details = "; ".join(f"{k.replace('_', ' ')}: {v}" for k, v in rec.items() if v not in (None, ""))
-            answer = f"Authorized details for {label}: {details}. Dataset snapshot: {r.dataset_now}."
-    else:
-        answer="I found the following authoritative passages. I excluded deprecated policy and unverified ticket history from the current answer: " + " ".join(x["text"] for x in first.get("results",[])[:3])
-    return {"answer":answer,"events":events,"dataset_now":r.dataset_now}
+def _answer_for(name, result, r):
+    if name=="propose_escalation":
+        return f"I prepared an escalation draft for {result['payload_preview']['account_id']}. It is pending your explicit confirmation; no action has been executed."
+    if name=="analyze_operations":
+        if result["recurring_issues"]:
+            groups="; ".join(f"{x['label']} ({x['account_count']} accounts; tickets {', '.join(x['ticket_ids'])})" for x in result["recurring_issues"])
+            return f"I analyzed {result['ticket_count']} real tickets across {len(result['accounts_analyzed'])} accounts. Recurring cross-customer issues: {groups}. Dataset snapshot: {result['dataset_now']}."
+        repeats="; ".join(f"{x['label']} ({', '.join(x['ticket_ids'])}, one customer only)" for x in result["same_customer_repeats"])
+        note=f" Same-customer repeats found: {repeats}." if repeats else ""
+        return f"I analyzed {result['ticket_count']} real tickets across {len(result['accounts_analyzed'])} accounts. No significant recurring issue was found across {result['minimum_accounts']} or more customers.{note} Dataset snapshot: {result['dataset_now']}."
+    if name=="evaluate_entitlement":
+        if result["evaluation_type"]=="cancellation":
+            fee_note="This is not fee-free." if result["fee_inr"] else "This is fee-free."
+            return f"For {result['order_id']}, the deterministic cancellation evaluation is **{result['result']}**. Cancellation fee: INR {result['fee_inr']}. {fee_note} {result['recommended_next_step']}. Governing citations: {', '.join(result['governing_sources'])}."
+        if result["result"]=="needs_verification":
+            return f"For {result['order_id']}, the service-credit calculation needs verification. Missing facts: {', '.join(result['missing_or_conflicting_facts'])}. Governing citations: {', '.join(result['governing_sources'])}."
+        return f"For {result['order_id']}, the deterministic service-credit evaluation is **{result['result']}**. Credit: INR {result['credit_inr']}. {result['recommended_next_step']}. Governing citations: {', '.join(result['governing_sources'])}."
+    if name=="lookup_records":
+        records=result.get("records")
+        if records is not None:
+            if not records: return f"No authorized {result['record']['record_type']} records were found. Dataset snapshot: {r.dataset_now}."
+            labels=[x.get("order_id") or x.get("ticket_id") or f"{x.get('account_id')} ({x.get('account_name','account')})" for x in records]
+            return f"Found {len(records)} authorized {result['record']['record_type']} records: {', '.join(labels)}. Dataset snapshot: {r.dataset_now}."
+        rec=result["record"]["fields"]; label=rec.get("order_id") or rec.get("ticket_id") or rec.get("account_id") or "record"
+        details="; ".join(f"{k.replace('_',' ')}: {v}" for k,v in rec.items() if v not in (None,""))
+        return f"Authorized details for {label}: {details}. Dataset snapshot: {r.dataset_now}."
+    return "I found the following authoritative passages. I excluded deprecated policy and unverified ticket history from the current answer: "+" ".join(x["text"] for x in result.get("results",[])[:3])
 
-async def hosted_route(message: str, session: Session, r: Runtime):
-    """Use a free-tier model for tool selection, never for authorization/decisions.
 
-    The deterministic planner remains the safe answer path. This bounded probe
-    makes Groq/Gemini tool calling real when a key is configured, while a quota
-    error transparently falls back to the same tested local path.
-    """
+def _dispatch(selection: ToolSelection, message, s, r, source):
+    event={"type":"tool","name":selection.name,"status":"running","selection_source":source}
+    try:
+        result=execute_tool(selection.name,selection.arguments,s,r,LAST_CONTEXT.get(_context_key(s)))
+        event.update(status="complete",result=result)
+        if selection.name=="lookup_records" and result.get("record",{}).get("fields"): _remember_context(s,result["record"]["fields"])
+        return {"answer":_answer_for(selection.name,result,r),"events":[event],"dataset_now":r.dataset_now,"model_routing":source}
+    except HTTPException as exc:
+        status="denied" if exc.status_code==403 else "needs_input" if exc.status_code==422 else "error"
+        event.update(status=status,error={"status_code":exc.status_code,"detail":exc.detail})
+        prefix="Access denied" if exc.status_code==403 else "I need more information" if exc.status_code==422 else "The requested tool could not complete"
+        return {"answer":f"{prefix}: {exc.detail}.","events":[event],"dataset_now":r.dataset_now,"model_routing":source}
+    except (ValidationError,ValueError,TypeError,KeyError):
+        event.update(status="error",error={"status_code":422,"detail":"Invalid tool arguments"})
+        return {"answer":"The selected tool needs valid record details before it can run.","events":[event],"dataset_now":r.dataset_now,"model_routing":source}
+
+
+async def _model_selection(message: str, session: Session, context: dict, router_provider=None):
     global model_calls_today, model_call_day
     today=date.today()
     if today != model_call_day: model_call_day, model_calls_today = today, 0
-    if not (GROQ_API_KEY or GEMINI_API_KEY) or model_calls_today >= MODEL_DAILY_LIMIT: return None
+    selected_provider=router_provider or provider
+    if router_provider is None and (not (GROQ_API_KEY or GEMINI_API_KEY) or model_calls_today >= MODEL_DAILY_LIMIT): return None
     try:
         model_calls_today += 1
-        msg=await provider.complete([{"role":"system","content":SYSTEM},{"role":"user","content":message}],TOOLS)
+        scope={"role":session.role,"allowed_account_ids":session.allowed_account_ids,"all_accounts":session.all_accounts,"current_record_context":context or None}
+        msg=await selected_provider.complete([{"role":"system","content":SYSTEM+"\nAuthenticated session context: "+json.dumps(scope)},{"role":"user","content":message}],TOOLS,tool_choice="required")
         if not msg: return None
         calls=msg.get("tool_calls") or []
-        routed=[]
-        for call in calls[:2]:
-            fn=call.get("function",{}); name=fn.get("name"); raw=fn.get("arguments",{})
-            try: args=json.loads(raw) if isinstance(raw,str) else raw
-            except Exception: continue
-            if name in {"lookup_records","search_documents","evaluate_entitlement","propose_escalation"}:
-                # Execute only through the same guarded dispatcher used offline.
-                if name == "propose_escalation":
-                    # The deterministic path owns proposal creation so a model
-                    # retry can never create duplicate pending actions.
-                    routed.append({"type":"tool","name":name,"status":"model_selected_pending_safe_dispatch"})
-                else:
-                    result=execute_tool(name,args,session,r)
-                    routed.append({"type":"tool","name":name,"status":"model_selected_and_guarded","result":result})
-        return routed or [{"type":"model","name":"provider_router","status":"completed"}]
+        if not calls: return None
+        fn=calls[0].get("function",{}); name=fn.get("name"); raw=fn.get("arguments",{})
+        args=json.loads(raw) if isinstance(raw,str) else raw
+        if name not in {"lookup_records","search_documents","evaluate_entitlement","analyze_operations","propose_escalation"}: return None
+        return ToolSelection(name,args or {}),"native:"+msg.get("_provider","model")
     except Exception:
         return None
 
+
+async def run_agent(message, s, r, router_provider=None):
+    context=LAST_CONTEXT.get(_context_key(s),{})
+    model_choice=await _model_selection(message,s,context,router_provider)
+    guard=high_confidence_selection(message,context)
+    if model_choice:
+        selection,source=model_choice
+        if guard and selection.name != guard.name:
+            selection=guard; source+="+safety_correction"
+        elif guard:
+            selection=ToolSelection(selection.name,{**selection.arguments,**guard.arguments})
+    else:
+        selection=infer_fallback(message,context); source="local_quota_fallback"
+    return _dispatch(selection,message,s,r,source)
+
+
+def local_answer(message,s,r):
+    """Synchronous deterministic fallback retained for offline tests/operation."""
+    context=LAST_CONTEXT.get(_context_key(s),{})
+    return _dispatch(infer_fallback(message,context),message,s,r,"local_quota_fallback")
+
 @app.post("/api/chat")
 async def chat(q: ChatRequest, response: Response, s: Session=Depends(get_session), r: Runtime=Depends(rt)):
-    # The local planner is the tested source-of-truth answer path. When keys are
-    # configured, Groq/Gemini performs bounded tool selection first; its output
-    # cannot bypass the guarded dispatcher or deterministic evaluator.
-    routed=await hosted_route(q.message,s,r)
-    result=local_answer(q.message,s,r)
-    if routed:
-        result["events"]=[*routed,*result["events"]]
-        result["model_routing"]="groq_or_gemini"
-    else:
-        result["model_routing"]="local_fallback"
+    result=await run_agent(q.message,s,r)
     # Make it explicit to every intermediary that each POST is a new agent turn.
     response.headers["Cache-Control"]="no-store"
     result["turn_id"]=q.turn_id or str(uuid.uuid4()); return result

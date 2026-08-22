@@ -26,8 +26,15 @@ class DocumentQuery(BaseModel):
 
 class LookupQuery(BaseModel):
     record_type: Literal["account", "order", "ticket"]
-    record_id: str
+    record_id: str | None = None
     include_related: bool = True
+    query_scope: Literal["assigned_accounts", "other_accounts", "all_accounts"] = "assigned_accounts"
+
+class AnalyticsQuery(BaseModel):
+    analysis_type: Literal["recurring_ticket_issues"] = "recurring_ticket_issues"
+    scope: Literal["assigned_accounts", "all_accounts"] = "all_accounts"
+    min_accounts: int = Field(default=2, ge=2, le=10)
+    include_closed: bool = True
 
 class EvaluateQuery(BaseModel):
     order_id: str

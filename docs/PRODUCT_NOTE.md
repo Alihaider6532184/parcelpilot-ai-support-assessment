@@ -9,7 +9,7 @@ The product addresses trust and reliability. It makes source status visible, app
 1. Replace mock auth with SSO and durable per-account permissions.
 2. Move the action ledger to a durable workflow/ticket system with approvals and notifications.
 3. Add evaluation traces and a curated adversarial test set for conflict, staleness, and prompt-injection cases.
-4. Add proactive issue detection once durable ticket history and operational telemetry are available.
+4. Extend the supplied-data recurring-ticket analysis into proactive issue detection once durable ticket history and operational telemetry are available.
 
 ## Intentionally left out
 

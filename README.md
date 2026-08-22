@@ -25,7 +25,7 @@ npm run dev
 
 Open http://localhost:3000 and choose `priya`, `arjun`, `manager`, or `viewer`. The source pack is read from `data/raw/` by default. To rebuild the SQLite/Chroma runtime after changing raw files, delete `backend/runtime/` and restart; or set `PARCELPILOT_DATA_DIR` to another directory containing the same seven files.
 
-Hosted model-routing probes are capped by `MODEL_DAILY_LIMIT` (default 40 per process day) to protect free-tier quotas. If Groq/Gemini times out, rate-limits, or reaches the cap, the tested deterministic local planner continues answering from guarded tools. No provider can guarantee an unlimited free quota, but quota exhaustion does not take down the demo.
+Native model tool-selection calls are capped by `MODEL_DAILY_LIMIT` (default 40 per process day) to protect free-tier quotas. The current defaults are `openai/gpt-oss-20b` on Groq and `gemini-3.6-flash` on Gemini; override them with `GROQ_MODEL` or `GEMINI_MODEL`. Groq receives all five function declarations with required tool choice; Gemini uses native function calling as the retry fallback. If both providers time out, rate-limit, or reach the cap, the tested local router continues through the same guarded tools. No provider can guarantee an unlimited free quota, but quota exhaustion does not take down the demo.
 
 ## Tests and checks
 
@@ -34,7 +34,7 @@ cd backend
 pytest -q
 ```
 
-The tests cover cross-account denial in every tool path, confirmation gating/idempotency, actual-document precedence and deprecation, agreement overrides, unverified context, and multiple record IDs. The UI shows each invoked tool as a badge. Without API keys, the local planner still demonstrates a complete multi-step flow; keys enable hosted model integration.
+The tests cover cross-account denial in every tool path, confirmation gating/idempotency, actual-document precedence and deprecation, agreement overrides, unverified context, natural-language routing, and multiple record IDs. The fifth tool, `analyze_operations`, queries the SQLite ticket data and detects issue groups recurring across customer accounts. The UI shows each invoked tool as a badge. Without API keys, the quota fallback still demonstrates the guarded flow; keys enable native hosted model selection.
 
 ## Deployment
 
