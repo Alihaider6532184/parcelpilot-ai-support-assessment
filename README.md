@@ -25,6 +25,8 @@ npm run dev
 
 Open http://localhost:3000 and choose `priya`, `arjun`, `manager`, or `viewer`. The source pack is read from `data/raw/` by default. To rebuild the SQLite/Chroma runtime after changing raw files, delete `backend/runtime/` and restart; or set `PARCELPILOT_DATA_DIR` to another directory containing the same seven files.
 
+Hosted model-routing probes are capped by `MODEL_DAILY_LIMIT` (default 40 per process day) to protect free-tier quotas. If Groq/Gemini times out, rate-limits, or reaches the cap, the tested deterministic local planner continues answering from guarded tools. No provider can guarantee an unlimited free quota, but quota exhaustion does not take down the demo.
+
 ## Tests and checks
 
 ```powershell
