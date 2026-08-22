@@ -223,6 +223,27 @@ def test_document_retrieval_returns_topically_relevant_sections(tmp_path,query,e
     assert 'Scope and source precedence' not in top['section']
 
 
+@pytest.mark.parametrize('query,expected_text',[
+    ('What is known about KI-208 bulk upload failures?','below 3,000 rows'),
+    ('Do we have details for known issue KI-211?','up to 20 minutes late'),
+    ('What is the Growth plan CSV row limit?','up to 5,000 rows'),
+    ('How does the current policy define P1 severity?','Complete production outage'),
+    ('What are the Enterprise response targets?','30 minutes'),
+])
+def test_explicit_document_questions_cannot_be_misrouted_by_model(tmp_path,query,expected_text):
+    LAST_CONTEXT.clear(); r=make_agent_runtime(tmp_path)
+    manager=Session(user_id='manager',role='ops_manager',all_accounts=True)
+    class WrongRouter:
+        async def complete(self,*args,**kwargs):
+            return {'tool_calls':[{'function':{'name':'analyze_operations','arguments':{'analysis_type':'recurring_ticket_issues','scope':'all_accounts'}}}], '_provider':'wrong'}
+    # A supplied router simulates a hosted-model misclassification. The safety
+    # correction must preserve the explicit document intent.
+    result=asyncio.run(run_agent(query,manager,r,router_provider=WrongRouter()))
+    assert tool_names(result)==['search_documents']
+    assert 'safety_correction' in result['model_routing']
+    assert expected_text.lower() in result['answer'].lower()
+
+
 def test_account_named_cancellation_retrieves_contract_and_sop_sections(tmp_path):
     _,docs=make_runtime(tmp_path); priya=Session(user_id='priya',role='support_agent',allowed_account_ids=['ACCT-001'])
     result=DocumentTool(docs,tmp_path/'chroma').search(DocumentQuery(query="Can Northstar cancel a BOOKED shipment before pickup without a fee?"),priya)
@@ -255,7 +276,7 @@ def test_customer_named_entitlement_cannot_cross_account_scope(tmp_path):
     assert 'outside this session scope' in result['answer']
 
 
-def test_daily_model_limit_falls_back_before_the_41st_call_without_partial_answer(tmp_path,monkeypatch):
+def test_daily_model_limit_never_blocks_deterministic_document_answer(tmp_path,monkeypatch):
     LAST_CONTEXT.clear(); r=make_agent_runtime(tmp_path)
     manager=Session(user_id='manager',role='ops_manager',all_accounts=True)
     class MustNotRun:
@@ -265,6 +286,6 @@ def test_daily_model_limit_falls_back_before_the_41st_call_without_partial_answe
     monkeypatch.setattr(main_module,'model_call_day',main_module.date.today())
     monkeypatch.setattr(main_module,'model_calls_today',main_module.MODEL_DAILY_LIMIT)
     result=asyncio.run(run_agent('What does the current support policy say about P1 severity?',manager,r))
-    assert result['model_routing']=='local_quota_fallback'
+    assert result['model_routing']=='deterministic_intent'
     assert tool_names(result)==['search_documents']
     assert 'Complete production outage' in result['answer']

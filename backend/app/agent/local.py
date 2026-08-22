@@ -52,6 +52,21 @@ def high_confidence_selection(message: str, context: dict | None = None) -> Tool
     unavailable or produces an unsafe selection.
     """
     words=_tokens(message); oid,tid,aid=_ids(message); context=context or {}
+    # Explicit document entities and policy/capability questions are reads from
+    # the governed PDF corpus. Keep these ahead of aggregate analytics so an
+    # LLM cannot mistake "known issue" for a request to analyze live tickets.
+    known_issue=re.search(r"\bKI-\d+\b",message,re.IGNORECASE)
+    policy_read=(
+        bool(words & {"policy","severity","definition","definitions","response","target","targets","sop"})
+        and not bool(oid or tid or aid)
+    )
+    capability_read=(
+        bool(words & {"plan","growth","enterprise","standard","capability","capabilities","limit","limits"})
+        and bool(words & {"upload","uploads","bulk","rows","csv"})
+        and not bool(oid or tid or aid)
+    )
+    if known_issue or policy_read or capability_read:
+        return ToolSelection("search_documents",{"query":message,"account_id":context.get("account_id"),"topics":[]})
     action_nouns={"escalation","escalate","escalated","follow","followup"}
     action_verbs={"create","file","open","raise","start","escalate"}
     action=(bool(words & action_nouns) and bool(words & action_verbs)) or "escalate" in words or (bool(words & {"create","file","raise","start"}) and bool(words & {"ticket","tickets","case"})) or ({"open","ticket"} <= words and ("new" in words or "for" in words or bool(context)))
