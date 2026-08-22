@@ -6,6 +6,7 @@ class Session(BaseModel):
     role: Literal["support_agent", "ops_manager", "viewer"]
     allowed_account_ids: list[str] = Field(default_factory=list)
     all_accounts: bool = False
+    session_id: str | None = None
 
 class LoginRequest(BaseModel):
     user_id: str

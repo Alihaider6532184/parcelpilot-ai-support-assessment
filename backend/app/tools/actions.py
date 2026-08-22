@@ -17,6 +17,7 @@ class ActionTool:
         with sqlite3.connect(self.path) as c: c.execute("INSERT INTO proposals VALUES (?,?,?,?,?,?,?)",(pid,session.user_id,q.account_id,json.dumps(payload),"pending_confirmation",expires,None))
         return {"proposal_id":pid,"status":"pending_confirmation","summary":q.reason,"payload_preview":payload,"expires_at":expires,"confirmation_phrase":"Confirm escalation"}
     def confirm(self, proposal_id, confirmed, session):
+        if session.role == "viewer": raise HTTPException(status_code=403, detail="Viewer cannot confirm actions")
         if not confirmed: raise HTTPException(status_code=400, detail="Explicit confirmation is required")
         with sqlite3.connect(self.path) as c:
             c.row_factory=sqlite3.Row; row=c.execute("SELECT * FROM proposals WHERE proposal_id=?",(proposal_id,)).fetchone()
